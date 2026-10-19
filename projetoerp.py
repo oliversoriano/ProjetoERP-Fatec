@@ -1,22 +1,26 @@
-# INSTALAR BIBLIOTECA PARA BIPAR QRCODE
-# pip install opencv-python qrcode pillow
+"""
+Sistema de Movimentação de Peças (mini ERP de chão de fábrica)
 
-# VISUALIZAR SE A BIBLIOTECA ESTÁ INSTALADA
-# python -c "import cv2; import qrcode; from PIL import Image; import sqlite3; print('Todas as bibliotecas estão instaladas!')"
+Cada peça recebe um QR Code. Ao passar de um setor para outro, a peça é
+"bipada" pela câmera e a movimentação fica registrada no banco SQLite.
 
+Este módulo tem duas partes:
+  1. Funções de regra de negócio (usadas pelo terminal e pela interface gráfica)
+  2. Menu de terminal (executado com: python projetoerp.py)
+"""
+
+import os
 import sqlite3
 from datetime import datetime
-import qrcode
-from PIL import Image
+
 import cv2
-import os
+import qrcode
 
-# Configurações
-PASTA_QR_CODES = "qrcodes_pecas"
-if not os.path.exists(PASTA_QR_CODES):
-    os.makedirs(PASTA_QR_CODES)
+# Caminhos sempre relativos à pasta do projeto, independente de onde o script é executado
+PASTA_PROJETO = os.path.dirname(os.path.abspath(__file__))
+CAMINHO_BANCO = os.path.join(PASTA_PROJETO, "movimentacao_pecas.db")
+PASTA_QR_CODES = os.path.join(PASTA_PROJETO, "qrcodes_pecas")
 
-# Definir setores atualizados
 SETORES = {
     '1': 'Ferbal',
     '2': 'Serra',
@@ -31,301 +35,278 @@ SETORES = {
     '11': 'Expedição'
 }
 
-# Criar banco de dados
+
+# =====================================================================
+# 1. REGRAS DE NEGÓCIO
+# =====================================================================
+
+def conectar():
+    return sqlite3.connect(CAMINHO_BANCO)
+
+
 def criar_banco_dados():
-    conn = sqlite3.connect('movimentacao_pecas.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS pecas (
-        codigo TEXT PRIMARY KEY,
-        descricao TEXT,
-        quantidade INTEGER,
-        data_cadastro TEXT,
-        caminho_qrcode TEXT
-    )
-    ''')
-    
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS movimentacoes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        codigo_peca TEXT,
-        origem TEXT,
-        destino TEXT,
-        data_hora TEXT,
-        FOREIGN KEY (codigo_peca) REFERENCES pecas (codigo)
-    )
-    ''')
-    conn.commit()
-    conn.close()
+    os.makedirs(PASTA_QR_CODES, exist_ok=True)
+    with conectar() as conn:
+        conn.execute('''
+        CREATE TABLE IF NOT EXISTS pecas (
+            codigo TEXT PRIMARY KEY,
+            descricao TEXT,
+            quantidade INTEGER,
+            data_cadastro TEXT,
+            caminho_qrcode TEXT
+        )''')
+        conn.execute('''
+        CREATE TABLE IF NOT EXISTS movimentacoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            codigo_peca TEXT,
+            origem TEXT,
+            destino TEXT,
+            data_hora TEXT,
+            FOREIGN KEY (codigo_peca) REFERENCES pecas (codigo)
+        )''')
 
-# Mostrar setores disponíveis
-def mostrar_setores():
-    print("\nSetores disponíveis:")
-    for key, value in SETORES.items():
-        print(f"{key}. {value}")
 
-# Gerar QR Code
-def gerar_qrcode(codigo, descricao):
-    qr = qrcode.QRCode(
-        version=1,
-        error_correction=qrcode.constants.ERROR_CORRECT_L,
-        box_size=10,
-        border=4,
-    )
+def agora():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def gerar_qrcode(codigo):
+    """Gera a imagem do QR Code com o código da peça e devolve o caminho do arquivo."""
+    qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
     qr.add_data(codigo)
     qr.make(fit=True)
-    
-    img = qr.make_image(fill_color="black", back_color="white")
-    caminho_arquivo = os.path.join(PASTA_QR_CODES, f"peca_{codigo}.png")
-    img.save(caminho_arquivo)
-    return caminho_arquivo
 
-# Cadastrar nova peça
-def cadastrar_peca():
-    print("\n--- Cadastro de Nova Peça ---")
-    codigo = input("Digite o código numérico da peça: ").strip()
-    
-    conn = sqlite3.connect('movimentacao_pecas.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT codigo FROM pecas WHERE codigo = ?', (codigo,))
-    if cursor.fetchone():
-        print("Erro: Já existe uma peça com este código!")
-        conn.close()
-        return
-    
-    descricao = input("Digite a descrição da peça: ").strip()
-    
+    caminho = os.path.join(PASTA_QR_CODES, f"peca_{codigo}.png")
+    qr.make_image(fill_color="black", back_color="white").save(caminho)
+    return caminho
+
+
+def buscar_peca(codigo):
+    """Devolve (codigo, descricao, quantidade, caminho_qrcode) ou None."""
+    with conectar() as conn:
+        return conn.execute(
+            'SELECT codigo, descricao, quantidade, caminho_qrcode FROM pecas WHERE codigo = ?', (codigo,)
+        ).fetchone()
+
+
+def cadastrar_peca(codigo, descricao, quantidade):
+    """Cadastra a peça e gera o QR Code. Lança ValueError com a mensagem do problema."""
+    codigo = str(codigo).strip()
+    descricao = str(descricao).strip()
+
+    if not codigo.isdigit():
+        raise ValueError("O código da peça deve conter apenas números.")
+    if not descricao:
+        raise ValueError("Informe a descrição da peça.")
     try:
-        quantidade = int(input("Digite a quantidade de peças: ").strip())
-        if quantidade <= 0:
-            raise ValueError
-    except ValueError:
-        print("Erro: Quantidade deve ser um número inteiro positivo!")
-        conn.close()
-        return
-    
-    caminho_qrcode = gerar_qrcode(codigo, descricao)
-    
-    cursor.execute('''
-    INSERT INTO pecas (codigo, descricao, quantidade, data_cadastro, caminho_qrcode)
-    VALUES (?, ?, ?, ?, ?)
-    ''', (codigo, descricao, quantidade, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), caminho_qrcode))
-    
-    conn.commit()
-    conn.close()
-    print(f"\nPeça cadastrada com sucesso!")
-    print(f"Código: {codigo} | Descrição: {descricao} | Quantidade: {quantidade}")
-    print(f"QR Code gerado em: {caminho_qrcode}")
+        quantidade = int(quantidade)
+    except (TypeError, ValueError):
+        raise ValueError("A quantidade deve ser um número inteiro.")
+    if quantidade <= 0:
+        raise ValueError("A quantidade deve ser maior que zero.")
+    if buscar_peca(codigo):
+        raise ValueError("Já existe uma peça com este código.")
 
-# Ler QR Code
+    caminho_qrcode = gerar_qrcode(codigo)
+    with conectar() as conn:
+        conn.execute(
+            'INSERT INTO pecas (codigo, descricao, quantidade, data_cadastro, caminho_qrcode) VALUES (?, ?, ?, ?, ?)',
+            (codigo, descricao, quantidade, agora(), caminho_qrcode)
+        )
+    return caminho_qrcode
+
+
+def registrar_movimentacao(codigo, origem, destino):
+    """Registra a passagem da peça de um setor para outro. Lança ValueError se algo estiver errado."""
+    if not buscar_peca(codigo):
+        raise ValueError("Peça não encontrada no sistema.")
+    if origem not in SETORES.values() or destino not in SETORES.values():
+        raise ValueError("Setor inválido.")
+    if origem == destino:
+        raise ValueError("O setor de origem e o de destino devem ser diferentes.")
+
+    with conectar() as conn:
+        conn.execute(
+            'INSERT INTO movimentacoes (codigo_peca, origem, destino, data_hora) VALUES (?, ?, ?, ?)',
+            (codigo, origem, destino, agora())
+        )
+
+
+def listar_movimentacoes(codigo=None, limite=50):
+    """Lista (data_hora, codigo, descricao, quantidade, origem, destino), mais recentes primeiro."""
+    sql = '''
+        SELECT m.data_hora, m.codigo_peca, p.descricao, p.quantidade, m.origem, m.destino
+        FROM movimentacoes m
+        JOIN pecas p ON m.codigo_peca = p.codigo
+    '''
+    parametros = []
+    if codigo:
+        sql += ' WHERE m.codigo_peca = ?'
+        parametros.append(codigo)
+    sql += ' ORDER BY m.data_hora DESC, m.id DESC LIMIT ?'
+    parametros.append(limite)
+
+    with conectar() as conn:
+        return conn.execute(sql, parametros).fetchall()
+
+
+def apagar_movimentacoes(codigo):
+    """Apaga todas as movimentações de uma peça e devolve quantas foram removidas."""
+    with conectar() as conn:
+        return conn.execute('DELETE FROM movimentacoes WHERE codigo_peca = ?', (codigo,)).rowcount
+
+
 def ler_qrcode():
+    """Abre a câmera até ler um QR Code. Devolve o texto lido ou None (cancelado/sem câmera)."""
     cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("Erro: nenhuma câmera encontrada.")
+        return None
+
     detector = cv2.QRCodeDetector()
-    
-    print("\nAponte a câmera para o QR Code da peça...")
-    print("Pressione 'q' para cancelar")
-    
+    print("\nAponte a câmera para o QR Code da peça... (pressione 'q' para cancelar)")
+    lido = None
+
     while True:
-        _, img = cap.read()
-        data, bbox, _ = detector.detectAndDecode(img)
-        
-        if data:
-            print(f"\nCódigo lido: {data}")
-            cap.release()
-            cv2.destroyAllWindows()
-            return data
-        
-        cv2.imshow("Leitor QR Code", img)
-        
+        ok, img = cap.read()
+        if not ok:
+            break
+
+        dados, _, _ = detector.detectAndDecode(img)
+        if dados:
+            lido = dados
+            break
+
+        cv2.imshow("Leitor QR Code - pressione 'q' para cancelar", img)
         if cv2.waitKey(1) == ord("q"):
             break
-    
+
     cap.release()
     cv2.destroyAllWindows()
+    return lido
+
+
+# =====================================================================
+# 2. MENU DE TERMINAL
+# =====================================================================
+
+def escolher_setor(pergunta):
+    print("\nSetores disponíveis:")
+    for numero, nome in SETORES.items():
+        print(f"{numero}. {nome}")
+    return SETORES.get(input(pergunta).strip())
+
+
+def obter_codigo():
+    print("1. Digitar o código da peça")
+    print("2. Ler QR Code da peça")
+    opcao = input("Escolha uma opção: ").strip()
+    if opcao == '1':
+        return input("Digite o código da peça: ").strip()
+    if opcao == '2':
+        return ler_qrcode()
+    print("Opção inválida!")
     return None
 
-# Registrar movimentação
-def registrar_movimentacao():
+
+def menu_cadastrar():
+    print("\n--- Cadastro de Nova Peça ---")
+    codigo = input("Código numérico da peça: ")
+    descricao = input("Descrição da peça: ")
+    quantidade = input("Quantidade: ")
+    try:
+        caminho = cadastrar_peca(codigo, descricao, quantidade)
+        print(f"\nPeça cadastrada com sucesso! QR Code gerado em: {caminho}")
+    except ValueError as erro:
+        print(f"Erro: {erro}")
+
+
+def menu_movimentar():
     print("\n--- Registro de Movimentação ---")
     codigo = ler_qrcode()
     if not codigo:
         return
-    
-    conn = sqlite3.connect('movimentacao_pecas.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT descricao, quantidade FROM pecas WHERE codigo = ?', (codigo,))
-    resultado = cursor.fetchone()
-    
-    if not resultado:
-        print("Erro: Peça não encontrada no sistema!")
-        conn.close()
-        return
-    
-    descricao, quantidade = resultado
-    print(f"\nPeça encontrada: {codigo} - {descricao} (Quantidade: {quantidade})")
-    
-    mostrar_setores()
-    
-    origem = input("\nDigite o número do setor de origem: ").strip()
-    destino = input("Digite o número do setor de destino: ").strip()
-    
-    if origem not in SETORES or destino not in SETORES:
-        print("Erro: Setor inválido!")
-        conn.close()
-        return
-    
-    cursor.execute('''
-    INSERT INTO movimentacoes (codigo_peca, origem, destino, data_hora)
-    VALUES (?, ?, ?, ?)
-    ''', (codigo, SETORES[origem], SETORES[destino], datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    
-    conn.commit()
-    conn.close()
-    print(f"\nMovimentação registrada: {SETORES[origem]} → {SETORES[destino]}")
 
-# Limpar movimentações
-def limpar_movimentacoes():
-    print("\n--- Limpar Registros de Movimentação ---")
-    print("1. Buscar pelo código da peça")
-    print("2. Ler QR Code da peça")
-    opcao = input("Escolha uma opção: ").strip()
-    
-    if opcao == '1':
-        codigo = input("Digite o código da peça: ").strip()
-    elif opcao == '2':
-        codigo = ler_qrcode()
-        if not codigo:
-            return
-    else:
-        print("Opção inválida!")
-        return
-    
-    conn = sqlite3.connect('movimentacao_pecas.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT descricao FROM pecas WHERE codigo = ?', (codigo,))
-    if not cursor.fetchone():
+    peca = buscar_peca(codigo)
+    if not peca:
         print("Erro: Peça não encontrada no sistema!")
-        conn.close()
         return
-    
-    cursor.execute('''
-    SELECT id, origem, destino, data_hora 
-    FROM movimentacoes 
-    WHERE codigo_peca = ?
-    ORDER BY data_hora DESC
-    ''', (codigo,))
-    
-    movimentacoes = cursor.fetchall()
-    
-    if not movimentacoes:
-        print("Esta peça não possui movimentações registradas!")
-        conn.close()
-        return
-    
-    print("\nMovimentações registradas para esta peça:")
-    for mov in movimentacoes:
-        print(f"ID: {mov[0]} | {mov[3]} | {mov[1]} → {mov[2]}")
-    
-    confirmacao = input("\nDeseja realmente apagar TODAS as movimentações desta peça? (S/N): ").strip().upper()
-    if confirmacao == 'S':
-        cursor.execute('DELETE FROM movimentacoes WHERE codigo_peca = ?', (codigo,))
-        conn.commit()
-        print(f"Todas as movimentações da peça {codigo} foram removidas!")
-    else:
-        print("Operação cancelada.")
-    
-    conn.close()
+    print(f"\nPeça encontrada: {peca[0]} - {peca[1]} (Quantidade: {peca[2]})")
 
-# Ver histórico
-def ver_historico():
-    conn = sqlite3.connect('movimentacao_pecas.db')
-    cursor = conn.cursor()
-    
+    origem = escolher_setor("\nNúmero do setor de origem: ")
+    destino = escolher_setor("Número do setor de destino: ")
+    try:
+        registrar_movimentacao(codigo, origem, destino)
+        print(f"\nMovimentação registrada: {origem} → {destino}")
+    except ValueError as erro:
+        print(f"Erro: {erro}")
+
+
+def menu_historico():
     print("\n--- Histórico de Movimentações ---")
-    print("1. Ver histórico completo")
-    print("2. Buscar por código da peça")
-    print("3. Ler QR Code da peça")
-    opcao = input("Escolha uma opção: ").strip()
-    
-    if opcao == '1':
-        cursor.execute('''
-        SELECT m.codigo_peca, p.descricao, p.quantidade, m.origem, m.destino, m.data_hora
-        FROM movimentacoes m
-        JOIN pecas p ON m.codigo_peca = p.codigo
-        ORDER BY m.data_hora DESC
-        LIMIT 50
-        ''')
-    elif opcao == '2':
-        codigo = input("Digite o código da peça: ").strip()
-        cursor.execute('''
-        SELECT m.codigo_peca, p.descricao, p.quantidade, m.origem, m.destino, m.data_hora
-        FROM movimentacoes m
-        JOIN pecas p ON m.codigo_peca = p.codigo
-        WHERE m.codigo_peca = ?
-        ORDER BY m.data_hora DESC
-        ''', (codigo,))
-    elif opcao == '3':
-        codigo = ler_qrcode()
-        if not codigo:
-            conn.close()
-            return
-        cursor.execute('''
-        SELECT m.codigo_peca, p.descricao, p.quantidade, m.origem, m.destino, m.data_hora
-        FROM movimentacoes m
-        JOIN pecas p ON m.codigo_peca = p.codigo
-        WHERE m.codigo_peca = ?
-        ORDER BY m.data_hora DESC
-        ''', (codigo,))
-    else:
-        print("Opção inválida!")
-        conn.close()
+    print("0. Ver histórico completo")
+    opcao = input("Digite 0 ou Enter para escolher uma peça: ").strip()
+    codigo = None if opcao == '0' else obter_codigo()
+    if opcao != '0' and not codigo:
         return
-    
-    movimentacoes = cursor.fetchall()
-    conn.close()
-    
+
+    movimentacoes = listar_movimentacoes(codigo)
     if not movimentacoes:
         print("\nNenhuma movimentação encontrada!")
         return
-    
+
     print("\nData/Hora | Peça | Descrição | Quantidade | Origem → Destino")
     print("-" * 80)
-    for mov in movimentacoes:
-        print(f"{mov[5]} | {mov[0]} | {mov[1]} | {mov[2]} | {mov[3]} → {mov[4]}")
+    for data_hora, cod, descricao, qtd, origem, destino in movimentacoes:
+        print(f"{data_hora} | {cod} | {descricao} | {qtd} | {origem} → {destino}")
 
-# Menu principal
-def menu_principal():
-    print("\n=== Sistema de Movimentação de Peças ===")
-    print("1. Registrar movimentação")
-    print("2. Cadastrar nova peça")
-    print("3. Ver histórico")
-    print("4. Limpar movimentações de peça")
-    print("5. Sair")
-    return input("Escolha uma opção: ").strip()
 
-# Função principal
+def menu_limpar():
+    print("\n--- Limpar Registros de Movimentação ---")
+    codigo = obter_codigo()
+    if not codigo:
+        return
+    if not buscar_peca(codigo):
+        print("Erro: Peça não encontrada no sistema!")
+        return
+
+    movimentacoes = listar_movimentacoes(codigo, limite=1000)
+    if not movimentacoes:
+        print("Esta peça não possui movimentações registradas!")
+        return
+
+    for data_hora, _, _, _, origem, destino in movimentacoes:
+        print(f"{data_hora} | {origem} → {destino}")
+
+    if input("\nApagar TODAS as movimentações desta peça? (S/N): ").strip().upper() == 'S':
+        print(f"{apagar_movimentacoes(codigo)} movimentação(ões) removida(s).")
+    else:
+        print("Operação cancelada.")
+
+
 def main():
     criar_banco_dados()
-    
+    acoes = {'1': menu_movimentar, '2': menu_cadastrar, '3': menu_historico, '4': menu_limpar}
+
     while True:
-        opcao = menu_principal()
-        
-        if opcao == '1':
-            registrar_movimentacao()
-        elif opcao == '2':
-            cadastrar_peca()
-        elif opcao == '3':
-            ver_historico()
-        elif opcao == '4':
-            limpar_movimentacoes()
-        elif opcao == '5':
+        print("\n=== Sistema de Movimentação de Peças ===")
+        print("1. Registrar movimentação")
+        print("2. Cadastrar nova peça")
+        print("3. Ver histórico")
+        print("4. Limpar movimentações de peça")
+        print("5. Sair")
+        opcao = input("Escolha uma opção: ").strip()
+
+        if opcao == '5':
             print("Saindo do sistema...")
             break
+        if opcao in acoes:
+            acoes[opcao]()
         else:
             print("Opção inválida!")
-        
+
         input("\nPressione Enter para continuar...")
+
 
 if __name__ == "__main__":
     main()
